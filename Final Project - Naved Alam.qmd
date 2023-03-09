@@ -1,0 +1,825 @@
+---
+title: "US Unemployment Rates: Time Series Analysis"
+subtitle: "Analysis and Forecasting of Data from the U.S. Bureau of Labour Statistics"
+author: "Naved Alam"
+date: "February 24, 2023"
+format:
+  html:
+    code-fold: true
+    code-summary: "Code"
+embed-resources: true
+title-block-banner: "#038587"
+title-block-banner-color: white
+title-block-style: default
+execute:
+  warning: false
+  message: false
+  error: false
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+```{r warning=FALSE, echo=FALSE}
+library(rlang)
+library(tidyverse)
+library(rmarkdown)
+library(gapminder)
+library(janitor)
+library(lubridate)
+library(scales)
+library(gt)
+library(patchwork)
+library(kableExtra)
+library(reticulate)
+library(zoo)
+library(forecast)
+library(fable)
+library(feasts)
+library(tsibble)
+library(tseries)
+library(modeest)
+library(ggplot2)
+library(data.table)
+library(fable.prophet)
+library(prophet)
+library(DT)
+library(corrplot)
+library(changepoint)
+library(strucchange)
+library(dplyr)
+```
+
+```{r import, fig.height = 5, fig.width = 10, results='hide', echo =FALSE,warning=FALSE}
+unmp_full <- read_csv(paste0("data/UNRATENSA.csv"))
+unmp_full <- na.omit(unmp_full)
+unmp_data1 <- unmp_full[-(1:780),]
+unmp_data <- unmp_full[-(1:780),]
+colnames(unmp_data)[2] = "UnemploymentRate"
+colnames(unmp_data)[1] = "DATE"
+colnames(unmp_data1)[2] = "UnemploymentRate"
+colnames(unmp_data1)[1] = "DATE"
+attach(unmp_data)
+unmp_data <- unmp_data %>% 
+  mutate(DATE = yearmonth(DATE)) %>%
+  as_tsibble(index = DATE)
+```
+
+```{r ttsplit, fig.height = 5, fig.width = 10, results='hide', echo =FALSE, warning=FALSE}
+#| code-fold: false
+unmp_train = unmp_data %>%
+    filter(DATE<ymd('2021-01-01'))
+
+unmp_test = unmp_data %>%
+    filter(DATE>=ymd('2021-01-01'))
+
+
+unmp_train1 = unmp_data1 %>%
+    filter(DATE<ymd('2021-01-01'))
+
+unmp_test1 = unmp_data1 %>%
+    filter(DATE>=ymd('2021-01-01'))
+
+```
+
+## Section I - Exploratory Data Analysis and Time Series Decomposition
+
+**Dataset description:** <br/> *"The unemployment rate represents the
+number of unemployed as a percentage of the labor force. Labor force
+data are restricted to people 16 years of age and older, who currently
+reside in 1 of the 50 states or the District of Columbia, who do not
+reside in institutions (e.g., penal and mental facilities, homes for the
+aged), and who are not on active duty in the Armed Forces."*<br/> <br/>
+
+**Source:** <br/> [U.S. Bureau of Labor
+Statistics](https://www.bls.gov/)<br/> <br/>The data is generated from
+labor force data retrieved from the "Current Population Survey
+(Household Survey)". It is published monthly, in percent units, without
+any seasonal adjustment. <br/> <br/>
+
+#### Plotting raw data and analyzing yearly spread:
+
+```{r train, fig.height 5, fig.width = 10, results='hide'}
+
+p3 <- ggplot(unmp_train1, aes(x = DATE, y = UnemploymentRate)) + 
+  geom_line(color = "turquoise4") + 
+  theme_minimal() + 
+  labs(x = "Date", y = "Unemployment Rate", 
+       title = "Base Data - Last 8 Years", 
+       subtitle = "Monthly Percentage Unemployment Rates, Jan 2013 - Dec 2020",
+       caption = "Data source: U.S. Bureau of Labor Statistics") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 22), 
+        plot.subtitle = element_text(hjust = 0.5, size = 15),
+        plot.caption = element_text()) +
+    geom_smooth(aes(DATE, UnemploymentRate), method = "lm", color = "red")
+p3 + scale_x_date(date_labels = "%b %Y")
+
+p4 <- ggplot(unmp_train1, aes(x = DATE, y = UnemploymentRate, group = year(DATE))) + 
+  geom_boxplot(color = "turquoise4") + 
+  theme_minimal() + 
+  labs(x = "Date", y = "Unemployment Rate", 
+       title = "Annual Variation - Last 8 Years", 
+       subtitle = " Yearly Spread of Unemployment Data, 2013 - 2020",
+       caption = "Data source: U.S. Bureau of Labor Statistics") + 
+  theme(plot.title = element_text(hjust = 0.5, size = 22), 
+        plot.subtitle = element_text(hjust = 0.5, size = 15),
+        plot.caption = element_text())
+p4 + scale_x_date(date_labels = "%Y")
+
+```
+
+We have considered data from January 2013 to December 2020. The
+regression line shows a slightly downwards trend overall, and we observe
+a spike in unemployment during the year 2020, which can be attributed to
+COVID-19. <br/> <br/>
+
+#### Summary Statistics:
+
+```{r summary}
+
+urate <- unmp_train1[, 2]
+urate %>% summary() %>%
+  kbl(caption = "Unemployment Data, Jan 2013 - Dec 2020") %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  column_spec(2, width = "90em", background = "white")
+```
+
+```{r mode, echo=FALSE}
+getmode <- function(x) {
+   uniqv <- unique(x)
+   uniqv[which.max(tabulate(match(x, uniqv)))]
+}
+
+```
+
+<br/> Number of records in the data for the time period considered is
+**96**, with mean **5.46** , mode **4.5** , and standard deviation
+**1.98**. <br/><br/>
+
+#### Visualising the Behaviour/Distribution:
+
+```{r plots,  fig.align='center', fig.width = 11}
+hist <- unmp_train %>%
+  ggplot() +
+  geom_histogram(aes(UnemploymentRate), bins = 80, color = "white", fill = "turquoise4") +
+  xlab("Unemployment Rate") +
+  theme_minimal() 
+
+dens <- unmp_train %>%
+  ggplot() +
+  geom_density(aes(UnemploymentRate), alpha = 0.4, fill = "turquoise4", color = "turquoise4") +
+  xlab("Unemployment Rate") +
+  theme_minimal()
+
+violin <- unmp_train %>%
+  ggplot() +
+  geom_violin(aes("", UnemploymentRate), color = "turquoise4") +
+  ylab("Unemployment Rate") +
+  theme_minimal()
+
+boxplot <- unmp_train %>%
+  ggplot() +
+  geom_boxplot(aes("", UnemploymentRate), color = "turquoise4") +
+  ylab("Unemployment Rate") +
+  theme_minimal()
+par(mfrow = c(2,2))
+hist + violin + dens + boxplot
+```
+
+There are 4 instances where unemployment rate has exceeded 10%, but
+there are no clear outliers or obvious patterns which have emerged at
+this point. <br/> <br/>
+
+#### Decomposition and Seasonality Analysis:
+
+Decomposing the data to analyse the trend and residuals. We are taking a
+7th order MA for analysis.
+
+```{r decomp10, results='hide', fig.align='center', fig.width = 10, warning=FALSE}
+
+urate_decomp_train <- unmp_train1 %>%
+  mutate(
+    ma_7_center = rollapply(
+      UnemploymentRate,
+      7,
+      FUN = mean,
+      align = "center", fill = NA
+    )
+  ) %>%
+  mutate(resid = UnemploymentRate - ma_7_center) %>%
+  select(DATE, UnemploymentRate, ma_7_center, resid)
+
+urate_decomp_plot_train <- urate_decomp_train %>%
+  pivot_longer(
+    UnemploymentRate:resid,
+    names_to = "decomposition",
+    values_to = "UnemploymentRate"
+  ) %>%
+  mutate(
+    decomposition = case_when(
+      decomposition == "UnemploymentRate" ~ "Unemployment Rate",
+      decomposition == "ma_7_center" ~ "Trend",
+      decomposition == "resid" ~ "Remainder"
+    )
+  ) %>%
+  mutate(
+    decomposition = factor(
+      decomposition,
+      labels = c(
+        "Unemployment Rate",
+        "Trend",
+        "Remainder"
+      ),
+      levels = c(
+        "Unemployment Rate",
+        "Trend",
+        "Remainder"
+      )
+    )
+  ) %>%
+  ggplot() +
+  geom_line(aes(DATE, UnemploymentRate), size = 1, color = "turquoise4") +
+  facet_wrap(
+    ~decomposition,
+    nrow = 3,
+    scales = "free"
+  ) +
+  theme_bw() +
+  ylab("") +
+  xlab("Date")
+  ggtitle(
+    "Unemployment Rate = Trend + Remainder"
+  )
+
+
+urate_decomp_plot_train + scale_x_date(date_labels = "%b %Y")
+
+```
+
+Decomposition and visual analysis of the residuals shows that there is
+strong seasonality in the data, and that the residuals (remainder)
+cannot be classified as white noise. Apart from the spike in 2020 (due
+to COVID-19), it exhibits strong seasonality with 3 crests and 2 troughs
+per year. To break down the remainder into a seasonal component and
+noise, we can do an classical decomposition.
+
+```{r stl, fig.align='center', fig.width = 10}
+utsibble_10 <- unmp_train1 %>%
+mutate(DATE = yearmonth(DATE)) %>%
+as_tsibble(index = DATE) %>% filter_index("2013 Jan" ~ "2020 Dec")
+
+utsibble_10 %>% model(classical_decomposition(UnemploymentRate ~ season(12))) %>%
+components() %>% autoplot(colour = "turquoise4") + theme_bw()
+
+```
+
+Classical decomposition of the time series confirms strong seasonality.
+
+## Section II - ARIMA Modeling
+
+From previous visual analysis, we know that unemployment rate is not
+mean stationary, and shows a strong downward trend. This is expected as
+unemployment rates are dependent on a lot of factors (population, median
+age, HCI, urbanization etc.), many of which are not mean stationary.
+</br> </br>
+
+#### Stationarity Check Using Rolling Mean and Rolling SD Plots:
+
+Let us look at a rolling mean plot for a better perspective. </br>
+
+```{r meanstationarity, fig.height= 5, fig.width = 10, results='hide', warning=FALSE}
+unmp_roll <- unmp_train %>%
+  mutate(
+    unmp_mean = zoo::rollmean(
+      UnemploymentRate, 
+      k = 12, 
+      fill = NA),
+    unmp_sd = zoo::rollapply(
+      UnemploymentRate, 
+      FUN = sd, 
+      width = 12, 
+      fill = NA)
+  )
+
+unmp_rollmean <- unmp_roll %>%
+  ggplot() +
+    geom_line(aes(DATE, UnemploymentRate)) +
+  geom_line(aes(DATE, unmp_mean),color='turquoise4') +
+  theme_bw() +
+  ggtitle("Unemployment Rates: Mean over Time (12 month rolling window)") +
+  ylab("Unemployment Rate") +
+  xlab("Date")
+
+unmp_rollmean
+```
+
+</br> A rolling mean plot over a 12-month rolling window confirms the
+time series is not mean stationary.</br>
+
+Checking for variance stationarity (visual analysis suggests the time
+series has very slight variance non-stationarity, but let us look at a
+rolling SD plot for a better perspective).
+
+```{r variancestationarity, fig.height= 5, fig.width = 10, results='hide', warning=FALSE}
+
+unmp_rollsd <- unmp_roll %>%
+  ggplot() +
+  geom_line(aes(DATE, unmp_sd)) +
+  geom_smooth(aes(DATE,unmp_sd),method='lm',se=F,color = 'turquoise4')+
+  theme_bw() +
+  ggtitle("Unemployment Rates: Standard Deviation over Time (12 month rolling window)") +
+  ylab("Unemployment Rate") +
+  xlab("Date")
+
+unmp_rollsd
+
+```
+
+</br>Even though the rolling standard deviation line indicates variance
+non-stationarity, we can consider it to be variance stationary. The
+positive slope of the rolling SD line is only because of the COVID bump
+at the end. If we discount it, the rest of the data looks variance
+stationary. Inducing variance stationarity through transformations will
+not be necessary. </br></br>
+
+#### Seasonal Differencing:
+
+As demonstrated in section 1, the data exhibits seasonality, so we need
+to conduct seasonal differencing.</br>
+
+```{r seasonaldiff, fig.height = 3.5, fig.width = 10, results='hide', warning=FALSE}
+
+unmp_train <- unmp_train %>% 
+  mutate(UnemploymentRate_sdiff = difference(UnemploymentRate,12))
+
+unmp_train %>%
+ggplot() +
+  geom_line(aes(DATE, UnemploymentRate_sdiff), size = 0.5) +
+  ylab("Unemployment Rate") +
+  xlab("Date") +
+  ggtitle(
+    "Seasonally Differenced Data"
+  )
+```
+
+#### Stationarity Tests:
+
+The seasonally differenced data doesn't look mean stationary. Performing
+a *KPSS test* for stationarity. </br>
+
+```{r kpsstest, fig.height=5, fig.width = 10, warning=FALSE}
+
+unmp_sdiff_kpss = unmp_train %>%
+features(UnemploymentRate_sdiff, unitroot_kpss)
+
+unmp_sdiff_kpss
+```
+
+</br> The KPSS test output indicates non-stationarity. Performing an
+*Augmented Dickey-Fuller test*.</br>
+
+```{r adftest, fig.height = 5, fig.width = 10, warning=FALSE}
+
+unmp_sdiff_adf = adf.test(na.omit(unmp_train$UnemploymentRate_sdiff))
+unmp_sdiff_adf
+```
+
+</br>The ADF test output indicates the same. Inducing mean stationarity
+through differencing, visualizing the data, and performing the KPSS and
+ADF tests again to confirm.<br/>
+
+#### Mean Differencing:
+
+```{r meandiff, fig.height=3.5, fig.width = 10, results='hide', warning=FALSE, fig.align='default'}
+
+unmp_train <- unmp_train %>% 
+  mutate(UnemploymentRate_meandiff = (difference(UnemploymentRate_sdiff)))
+
+unmp_train %>% 
+ggplot() +
+  geom_line(aes(DATE, UnemploymentRate_meandiff), size = 0.5) +
+  ylab("Unemployment Rate") +
+  xlab("Date") +
+  ggtitle(
+    "Data After Mean Differencing"
+  )
+```
+
+```{r stationarity2, fig.height=5, fig.width = 10, warning=FALSE}
+
+unmp_mdiff_kpss = unmp_train %>%
+features(UnemploymentRate_meandiff, unitroot_kpss)
+unmp_mdiff_kpss
+
+unmp_mdiff_adf = adf.test(na.omit(unmp_train$UnemploymentRate_meandiff))
+unmp_mdiff_adf
+```
+
+Both the tests confirm stationarity.<br/> </br>
+
+#### ACF/PACF Plots:
+
+Visualizing the ACF and PACF plots of the differenced data.
+
+```{r ACFPACF, fig.height=5, fig.width = 10, warning=FALSE}
+
+unmp_train %>%
+  gg_tsdisplay(UnemploymentRate_meandiff,
+               plot_type='partial', lag=36) +
+  labs(title="Differenced for Mean Stationarity", y = "")
+
+```
+
+From the ACF and PACF plots above, it is difficult to determine if this
+is an AR or an MA. This requires fitting and assessing multiple standard
+ARIMA models, or using auto-ARIMA to estimate the time series
+nature.</br> </br>
+
+#### ARIMA Model Selection:
+
+Modeling the time series using multiple ARIMA configurations and
+comparing them.
+
+```{r ARIMA}
+models_bic = unmp_train %>%
+  model(
+    mod1 = ARIMA(UnemploymentRate~pdq(1,0,0)+PDQ(0,0,0)),
+    mod2 = ARIMA(UnemploymentRate~pdq(1,0,1)+PDQ(0,0,0)),
+    mod3 = ARIMA(UnemploymentRate~pdq(1,1,0)+PDQ(0,0,0)),
+    mod4 = ARIMA(UnemploymentRate~pdq(2,1,0)+PDQ(0,0,0)),
+    mod5 = ARIMA(UnemploymentRate~pdq(2,1,1)+PDQ(0,0,0)),
+    mod6 = ARIMA(UnemploymentRate~pdq(0,1,2)+PDQ(0,0,0)),
+    mod7 = ARIMA(UnemploymentRate~pdq(1,1,1)+PDQ(0,0,0))
+  )
+
+models_bic %>%
+  glance() %>%
+  arrange(BIC) %>% 
+  kbl(caption = "ARIMA Models Ranked by BIC") %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  column_spec(2, width = "90em", background = "white")
+
+```
+
+</br>The best model using lowest BIC as the criterion, is **model 3**
+(**1**, **1**, **0**).<br/>
+
+Let us plot the predicted values using this model vs the actuals.
+
+```{r bestmod, fig.height=4.5, fig.width = 10, warning=FALSE}
+
+fitted = models_bic['mod3'] %>%
+  augment() %>%
+  .$.fitted
+
+ggplot() +
+  geom_line(aes(unmp_train$DATE, unmp_train$UnemploymentRate)) +
+  geom_line(aes(unmp_train$DATE, fitted), color = "turquoise4", alpha = 0.7) +
+  theme_bw() +
+  xlab("Date") +
+  ylab("Unemployment Rates")+
+    ggtitle(
+    "Actual vs In-Sample Fitted Graph"
+  )
+  
+
+```
+
+The fitted values mimic the actuals well, but it is still heavily impacted by the structural break due to COVID.</br>
+
+#### Residual Plots:
+
+```{r residuals, fig.height= 5, fig.width = 10, warning=FALSE}
+
+models_bic['mod3'] %>%
+  gg_tsresiduals()
+
+```
+
+</br> The residuals look like white noise, there isn't a lot of
+autocorrelation left which hasn't been modeled. Performing a Ljung-Box
+test to confirm. </br>
+
+```{r ljungbox, fig.height= 5, fig.width = 10, warning=FALSE}
+
+#p<0.05 indicates residual autocorrelation at that lag
+
+models_bic['mod4'] %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 6, dof = 1)
+
+models_bic['mod4'] %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 12, dof = 1)
+
+models_bic['mod4'] %>%
+  augment() %>%
+  features(.innov, ljung_box, lag = 15, dof = 1)
+
+```
+
+P-values \> 0.05 show no residual autocorrelation at lags of 6, 12 and
+15. <br/>
+
+#### Auto ARIMA:
+
+Performing auto ARIMA to check for the best model.
+
+```{r autoArima, fig.height= 5, fig.width = 10, warning=FALSE}
+
+bestmod <- unmp_train %>%
+model(
+  ARIMA(UnemploymentRate,approximation=F, stepwise = F)
+) 
+
+bestmod %>%  report()
+
+```
+
+Auto ARIMA results largely mirror standard ARIMA, with the best model being **ARIMA**(**1**,**0**,**0**)**w/mean**. <br/>
+
+## Section III - Meta Prophet Model
+
+Using default hyperparameters to visualize and decompose our data.
+
+```{r prophetother, fig.height = 5, fig.width = 10, results='hide', warning=FALSE}
+
+prophet_train = unmp_train %>% 
+    rename(ds = DATE, # Have to name our date variable "ds"
+    y = UnemploymentRate)  # Have to name our time series "y"
+
+orig_model <- prophet::prophet(prophet_train) # Train Model
+
+orig_future <- make_future_dataframe(orig_model,periods = 12, freq = "month") # Create future dataframe for predictions
+
+orig_forecast <- predict(orig_model,orig_future) # Get forecast
+
+plot(orig_model,orig_forecast)+
+ylab("Unemployment Rate")+xlab("Date")+ ggtitle("Monthly Percentage Unemployment Rates - Prophet Forecast") +theme_bw()
+
+```
+
+We notice that the model struggles to provide a reasonably accurate
+forecast. Part of the inaccuracy can be attributed to the spike in 2020
+due to COVID-19, which is pulling the forecast upwards.
+
+#### Visualizing Plot Components:
+
+```{r prophetother2, fig.height = 5, fig.width = 10, results='hide', warning=FALSE}
+
+prophet_plot_components(orig_model,orig_forecast, uncertainty = TRUE)
+
+```
+
+The seasonality seems to be heavily biased due to the COVID impact.
+<br/>
+*(Note: Since the data is captured monthly, the decomposition only includes trend and yearly seasonality.)*<br/>
+
+#### Changepoint Detection:
+
+We first try to detect changepoints using our initial model without
+tuning any hyperparameters. </br>
+
+```{r multchangepointplot, fig.height = 5, fig.width = 10, results='hide', warning=FALSE}
+
+plot(orig_model,orig_forecast)+
+  add_changepoints_to_plot(orig_model)+
+  theme_bw()+xlab("Date")+ylab("Unemployment Rate")+
+  ggtitle("Changepoint Detection (based on initial un-tuned model)")
+```
+
+The changepoints detected do not seem to match changepoints based on
+simple visual inspection. We need to tune our hyperparameters for better
+detection performance. </br>
+
+```{r tunehyperparameters, fig.height = 5, fig.width = 10, results='hide', warning=FALSE}
+
+tuned_model1 <- prophet(prophet_train, n.changepoints = 6, changepoint.range = 0.95, changepoint.prior.scale = 100)
+
+forecast1 <- predict(tuned_model1, orig_future)
+plot(tuned_model1,forecast1) + add_changepoints_to_plot(tuned_model1) + theme_bw() + xlab("Date") + ylab("Unemployment Rate") + ggtitle("Forecast after Hyperparameter Tuning")
+```
+
+</br>
+
+```{r tuned1, fig.height = 5, fig.width = 10, results='hide', warning=FALSE}
+prophet_plot_components(tuned_model1, forecast1)
+```
+
+We observe that the algorithm does a better job now at picking up the
+downward trend induced due to COVID. However, the linear trend shows a
+steady downward decline till a point where unemployment rate reaches
+negative values, a real world impossibility. Let us look at whether
+fitting a logistic trend would alleviate this problem. We might need to
+set a saturation floor. </br>
+
+```{r tuned2, fig.height = 5, fig.width = 10, results='hide', warning=FALSE}
+one_yr_future1 <- make_future_dataframe(tuned_model1, periods = 12, freq = 'month')
+one_yr_forecast1 <- predict(tuned_model1, one_yr_future1)
+
+prophet_train$floor <- 0
+prophet_train$cap <- 15
+orig_future$floor <- 0
+orig_future$cap <- 15
+
+one_yr_future1$floor <- 0
+one_yr_future1$cap <- 15
+
+tuned_model2 = prophet(prophet_train, growth = 'logistic', n.changepoints = 1, changepoint.range = 0.9, changepoint.prior.scale = 0.3)
+tuned_model2_forecast = predict(tuned_model2, one_yr_future1)
+
+plot(tuned_model2,tuned_model2_forecast) + add_changepoints_to_plot(tuned_model2) + theme_bw() + xlab("Date") + ylab("Unemployment Rate") + ggtitle("Forecast after Hyperparameter Tuning (Logistic Trend)")
+
+```
+
+```{r tuned2decomp, fig.height = 5, fig.width = 10, results='hide', warning=FALSE}
+prophet_plot_components(tuned_model2, tuned_model2_forecast)
+```
+
+Using a logistic trend has mitigated the steep downward decline problem
+to a large degree. We have also set a saturation floor ensuring the
+forecast doesn't give negative values. </br>
+
+#### Seasonality Analysis and Modeling COVID as a Holiday:
+
+As observed above in the decomposition of our tuned model, unemployment
+rate data has a yearly seasonality which is additive (troughs and peaks
+are of roughly the same span and homoskedastic, denoting additive
+seasonality). </br>
+
+Unemployment rate isn't affected by holidays. However, to offset the
+seasonality shift being caused by a standalone occurrence like COVID-19,
+we will model it like a holiday.
+
+```{r final, fig.height = 5, fig.width = 10, results='hide', warning=FALSE}
+COVID <-  data.frame(
+    'holiday' = 'COVID',
+    'ds' = as.character('2020-01-01'),
+    'lower_window' = -30,
+    'upper_window' = 700)
+
+prophet_train$floor <- 0
+prophet_train$cap <- 15
+orig_future$floor <- 0
+orig_future$cap <- 15
+
+final_model <- prophet::prophet(prophet_train, seasonality.mode = 'additive', holidays = COVID, growth = 'logistic', changepoint.range = 0.95, changepoint.prior.scale = 100, n.changepoints = 6)
+
+final_forecast <- predict(final_model, orig_future)
+
+plot(final_model, final_forecast) +  
+  add_changepoints_to_plot(final_model) +
+  xlab("Date") + 
+  theme_bw() + xlab("Date") + ylab("Unemployment Rate") + ggtitle("Prophet Forecast - Final Model")
+
+```
+
+```{r finaldecomp, fig.height = 5, fig.width = 10, results='hide', warning=FALSE}
+prophet_plot_components(final_model, final_forecast)
+```
+
+Modeling COVID-19 as a holiday has definitely given us a better forecast
+as an output. We have assumed the effect of COVID-19 to last roughly for
+2 years (30 days before the "holiday", and 700 days after). Our final
+model thus offsets the effect of COVID-19, and also provides an
+explicable (non-negative) forecast of unemployment rate.
+
+## Section IV - Model Performance and Cross Validation
+
+#### Cross Validation Samples:
+
+```{r cutoffs, fig.height = 3.5, fig.width = 10, results='hide', warning=TRUE}
+
+cv_data <- prophet_train %>% as_tsibble(index = ds) %>% stretch_tsibble(.init = 36 , .step = 12) %>% filter(.id != 6)
+
+cv_data %>%
+    ggplot() +
+    geom_point(aes(ds, factor(.id), color = factor(.id))) +
+    ylab('Iteration') +
+    xlab("Date") +
+    ggtitle('Samples included in each Cross Validation Period') +
+    #labs(caption = "Figure 18") +
+    #theme(plot.title = element_text(hjust = 0.5), plot.caption = element_text(hjust = 0.5)) +
+    theme_bw()
+
+```
+
+The above is a visual depiction of the samples included in each
+iteration when we perform cross validation. For every sample, we will
+forecast model estimates for 1 year at the cutoff points. <br/>
+
+#### Rolling Window Cross Validation:
+
+```{r crossval, fig.height = 5, fig.width = 10, results='hide', warning=TRUE}
+
+cutoffs <- c(as.Date("2015-12-01"), as.Date("2016-12-01"), as.Date("2017-12-01"), as.Date("2018-12-01"), as.Date("2019-12-01"))
+
+df_test <- data.frame(ds = cv_data[["ds"]], id = cv_data[[".id"]]) %>% group_by(id) %>% summarise(ds = max(ds))
+?prophet::cross_validation
+
+prophet_cv <- prophet::cross_validation(final_model, cutoffs = cutoffs, horizon = 365, units = "days")
+
+prophet_cv <- prophet_cv %>% mutate(ds = as.Date(ds), cutoff = as.Date(cutoff))
+
+prophet_cv2 <- prophet_cv
+prophet_cv2 <- berryFunctions::insertRows(prophet_cv, 12, new = NA)
+prophet_cv3 <- berryFunctions::insertRows(prophet_cv2, 60, new = NA)
+
+prophet_cv3 <- prophet_cv3[1:60,]
+
+cv_forecast <- cv_data %>% 
+  model(SNAIVE = SNAIVE(y), 
+        ARIMA = ARIMA(y, approximation = F, stepwise = F)) %>% 
+  forecast(h = 12) %>% as_tsibble() %>% dplyr::select(-y)
+
+prophet_cv3 <- prophet_cv3 %>% select(yhat, ds) %>% rename(.mean = yhat) %>% mutate(.model = "prophet", .id = rep(1:nrow(df_test), each = 12))
+
+unmp_final <- cv_forecast  %>% bind_rows(prophet_cv3 %>% drop_na()) %>% 
+  as_tsibble(index = ds) %>% left_join(prophet_train) 
+
+unmp_final %>% 
+    ggplot() +
+    geom_line(aes(ds,y)) +
+    geom_line(aes(ds,.mean,color=factor(.id),linetype=.model), size = 0.75)+
+    scale_color_discrete(name='Iteration')+
+    theme_bw() +
+    xlab("Date") +
+    ylab("Unemployment Rate") +
+    scale_color_discrete(name = 'Cutoff Points') +
+    ylim(0,15) +
+    labs(caption = "ARIMA", title = "Cross Validation of Model - 5 Time Periods (Yearly)", color = "Legend") +
+    theme(plot.title = element_text(hjust = 0.5), plot.caption = element_text(hjust = 0.5)) 
+
+```
+
+We observe that for the initial cutoffs, all three models have a
+significant deviation from the actuals. But as the cross validation
+windows roll along (the training data increases), the deviations reduce
+and the models perform better.<br/>
+
+#### RMSE Comparison:
+
+```{r rmse, fig.height = 3.5, fig.width = 10, results='hide', warning=TRUE}
+unmp_final <- unmp_final %>% filter(ds < "2021-01-01")
+
+rmse_df <- unmp_final %>%
+  group_by(.id, .model) %>% 
+  summarise(rmse = sqrt(mean((y-.mean)^2)))
+
+
+unmp_final %>% ungroup() %>% data.table::data.table() %>% 
+  group_by(.model) %>% 
+  summarise(rmse = sqrt(mean((y-.mean)^2)))
+
+
+unmp_final %>% data.table::data.table() %>% 
+  group_by(.id,.model) %>%
+  mutate(h = row_number()) %>%  ungroup() %>% group_by(h, .model) %>% summarise(rmse = sqrt(mean((y-.mean)^2))) %>% 
+  ungroup() %>% 
+  ggplot() +
+  geom_line(aes(h,rmse,color=.model))+
+  theme_bw()+
+  ylab('Average RMSE at Forecasting Intervals')+
+  xlab('Months in the Future')
+```
+
+All 3 models perform well. When the forecast time frame is 3 months into
+the future, the RMSE is quite low. But then because of COVID, the RMSE
+reaches a peak of 5 and then maintains a steady decline the farther it
+gets from the COVID spike. We can say that the RMSE figures are inflated
+because of COVID. Since the RMSE of all 3 models are quite close, I have
+chosen to use the Prophet model for forecast purposes.<br/>
+
+#### Forecast Using Best Model:
+
+```{r forecast, fig.height = 4, fig.width = 10, results='hide', warning=TRUE}
+
+unmp_future12 <- make_future_dataframe(final_model, periods = 24, freq = 'month')
+
+unmp_future12$floor <- 0
+unmp_future12$cap <- 15
+
+final_forecast_12 <- predict(final_model, unmp_future12)
+final_forecast_12 <- final_forecast_12 %>% 
+  filter(ds >= '2021-01-01' & ds <= '2022-12-01') %>% 
+  select(ds, yhat)
+
+final_forecast_12$ds <- tsibble::yearmonth(final_forecast_12$ds)
+
+ggplot() +
+  geom_line(aes(unmp_data$DATE, unmp_data$UnemploymentRate), color = 'black') +
+  geom_line(aes(final_forecast_12$ds, final_forecast_12$yhat), color = 'turquoise', size = 1) +
+  xlab("Date") +
+  ylab("Unemployment Rate") +
+  labs(title = "12-point Prophet Model Forecast", color = "Legend") +
+  theme_bw()
+
+```
+
+<h1>End</h1>
+
+<hr/>
+
+*(U.S. Bureau of Labor Statistics, Unemployment Rate \[UNRATENSA\],
+retrieved from FRED, Federal Reserve Bank of St. Louis;
+<https://fred.stlouisfed.org/series/UNRATENSA>, January 19, 2023.)*
